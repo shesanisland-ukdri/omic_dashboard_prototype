@@ -1,0 +1,31 @@
+METHODOLOGICAL INFORMATION
+
+1. Description of methods used for collection/generation of data: 
+Mice were injected with either astrocyte-TurboID or astrocyte-tdTomato AAV. Each mouse received 3 doses of biotin (24 mg/kg) over 24 hours. All mice also received a single injection of PBS (24 mg/kg) 24 hours before culling
+Mice were culled by cervical dislocation and cortex hemispheres were dissected and flash frozen in liquid nitrogen. Samples were stored at -80C until proteins were isolated.
+Biotinylated proteins from the cortex were isolated using streptavidin coated beads.
+Isolated biotinylated proteins were digested into peptides via on-bead digestion with trypsin+Lys-C.
+10% of each isolated peptide sample was injected into the mass spec.
+
+2. Methods for processing the data: 
+Raw files were analyzed with DIANN software (1.8.1) using the following parameters:
+Spectra were analysed with library-free DIA (double-pass) using a Uniprot mouse FASTA file that included tdTomato and streptavidin and a library of known contaminants for in-silico digest
+"""report.pg_matrix"" file from DIANN output containing protein quantifications was used for downstream analysis"
+
+Custom R script was used to clean up the data:
+"a. Removed ambiguous proteins (contains "";"" in Protein.Group)"
+b. Dropped proteins without a gene name
+"c. Removed keratins, other cRAP (https://www.thegpm.org/crap/), and non-mouse proteins by searching against custom library of Crap_IDs"
+d. Excluded proteins found in 2 or fewer samples (irrespective of AAV)
+e. Normalised proteins by quantile normalisation.
+"f. All NA values (i.e., no protein detected) were imputed as 0 for differential expression analysis"
+
+
+3. Instrument- or software-specific information needed to interpret the data: 
+Mass spec: Bruker TIMS-TOF SCP
+Analysis Software: DIANN and custom analyses in R
+
+
+
+
+

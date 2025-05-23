@@ -1,0 +1,811 @@
+---
+title: "Multiomic Dashboard Viewer"
+format: 
+  dashboard:
+    scrolling: true
+    logo: ./misc/ukdri_logo.jpg
+theme: morph
+server: shiny
+page-layout: full
+date: today 
+#"`r Sys.Date()`"
+# icon: bootstrap #fontawesome
+---
+
+
+```{r setup, include=FALSE}
+# Default CRAN mirror
+options(repos = c(CRAN = "http://cran.us.r-project.org"))
+
+# Installations & prep
+packages <- c("shiny", "ggplot2", "DT", "readr", "shiny", "bslib", "shinyWidgets", "shinydashboard", "shinypanel", "RSQLite", "DBI", "glue", "fastqcr", "htmltools", "plotly", "purrr", "dplyr", "tidyverse", "tidyr", "stringr")
+packages_to_install <- packages[!(packages %in% installed.packages()[, "Package"])]
+if(!require(packages_to_install)) install.packages(packages_to_install, repos = "http://cran.us.r-project.org")
+
+# For tidyproteomics
+if (!require("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+BiocManager::install(c("Biostrings", "limma", "qvalue", "fgsea"))
+install.packages("devtools")
+devtools::install_github("jeffsocal/tidyproteomics")
+
+# Increase server limits for QC upload
+options(shiny.maxRequestSize = 100*1024^2)  # 100MB limit
+
+# Load libraries
+library(ggplot2)
+library(readr)
+library(DT)
+library(bslib)
+library(shiny)
+library(shinyWidgets)
+library(shinydashboard)
+library(shinypanel)
+library(RSQLite)
+library(DBI)
+library(glue)
+library(fastqcr)
+library(htmltools)
+library(plotly)
+library(purrr)
+library(dplyr)
+library(tidyverse)
+library(Biostrings)
+library(tidyproteomics)
+library(stringr)
+library(tidyr)
+
+con <- dbConnect(SQLite(), "data/Blanca/db_for_prototype.db")
+
+```
+
+## Row {.sidebar}
+
+```{r sidebar}
+# UI elements
+
+# Study/Assay Selection
+table_list <- dbListTables(con) # check tables available for querying below
+study_choices <- dbGetQuery(con, "SELECT DISTINCT Study_name FROM proteomics_study")    # or '*_exp'
+
+selectInput(
+  inputId = "datasets",
+  label = "Select Dataset(s) or Study :",
+  choices = study_choices$Study_name,
+  multiple = TRUE
+)
+
+# Analysis Selection
+selectInput("analysis",
+  label = "Select Analysis Type :",
+  choices = c(" ", "QC Analysis", "Differential expression", "Comparative Viewer", "Gene Regulatory Network (GRN)")
+)
+
+# Gene/Protein Selection
+selectizeInput(
+  inputId = "search_genes", 
+  label = "Gene or Protein Symbol (e.g., ENSG or Uniprot ID) :", 
+  choices = NULL,  # will be filled dynamically
+  multiple = TRUE,
+  options = list(
+    placeholder = 'Start typing gene/protein name or ID...',
+    maxOptions = 30,
+    maxItems = NULL,
+    create = FALSE
+  ),
+  width = "100%"
+)
+
+# Tree-style Metadata Filter Section
+filter_options <- data.frame(
+  category = c(rep("Organism", 2), rep("Organ", 3), rep("Cellular Filters", 4),
+    rep("Condition", 4), rep("Sex", 2), rep("Age", 3)),
+  value = c("Mouse", "Human",
+    "Brain", "Heart", "Lung",
+    "Neurons", "Astrocytes", "Microglia", "Oligodendrocytes",
+    "Disease", "Control", "Treated", "Untreated",
+    "Female", "Male",
+    "<3 years", "3-6 years", "6+ years"),
+  stringsAsFactors = FALSE
+)
+treeInput(
+  inputId = "other_filters",
+  label = "Apply filter",
+  choices = create_tree(filter_options),
+  returnValue = c("text"),   # "text", "id", "all"
+  closeDepth = 0
+)
+# OR
+# checkboxGroupInput(
+#   inputId = "organism_filter",
+#   label = "Organism :",
+#   choices = NULL,  # to fill dynamically, OR c("Mouse", "Human"),
+#   inline = TRUE
+# )
+
+# fastQC/ MultiQC upload
+fileInput("qc_file", "Upload FastQC HTML or ZIP file", accept = c(".html", ".zip"))
+
+actionButton("apply_filters", "Apply Filters")
+actionButton("load_data", "Load Data")
+```
+
+# Homepage Dashboard {data-icon="dna"}
+
+## Row {height=10%}
+
+```{r value-boxes}
+valueBoxOutput("total_datasets_box")
+valueBoxOutput("selected_datasets_box") 
+valueBoxOutput("selected_genes_box")
+```
+
+# Visualisation {data-icon="chart-line"}
+
+## Row {.tabset} 
+
+### Experimental results
+```{r data_preview}
+fluidRow(
+  column(12, DT::dataTableOutput(outputId = "exp_table"),
+    p("Experimental data from the SQL database, including logFC and adjusted p-values across comparisons.")
+  )
+)
+
+# fluidRow(
+#   column(12,
+#     selectInput("organism_filter", "Filter by Organism", choices = NULL, multiple = TRUE),
+#     DT::dataTableOutput("exp_data_table"),
+#     p("Experimental data from the SQL database, filtered by organism.")
+#   )
+# )
+
+```
+
+### QC Analysis
+```{r qc}
+fluidRow(
+  column(4,
+    htmlOutput(outputId = "qc_report_display", height = "300px"),
+    p("Uploaded QC report from FastQC or multiQC.")
+  )
+)
+
+```
+
+### Differential Expression
+```{r diff-exp}
+# Load experimental omic data from experimental table, then filter by organism and study???????????????
+# experimental_data <- dbReadTable(con, "proteomics_exp") %>%
+#   mutate(across(c(abundance_A, abundance_B, logFC_A_vs_B, pvalue_A_vs_B, padj_A_vs_B), as.numeric)) %>%
+#   select(-Exp_id)  # exclude `Exp_id` column
+
+# Real-time display of significant gene count according to user-defined inputs ie thresholds
+verbatimTextOutput("threshold_summary")
+
+# Threshold UI; includes conditional panel for custom values (only appears when "Custom" is selected)
+selectInput(    # or sliderInput()
+  inputId = "threshold_preset",
+  label = "Threshold Preset:",
+  choices = c(
+    "Strict (FC≥2, p≤0.01)" = "Strict (FC≥2, p≤0.01)",
+    "Moderate (FC≥1.5, p≤0.05)" = "Moderate (FC≥1.5, p≤0.05)",
+    "Lenient (FC≥1, p≤0.1)" = "Lenient (FC≥1, p≤0.1)",
+    "Custom" = "Custom"
+  ),
+  selected = "Moderate (FC≥1.5, p≤0.05)"
+)
+conditionalPanel(
+  condition = "input.threshold_preset == 'Custom'",
+  fluidRow(
+    column(6,
+      numericInput("logfc_threshold", "Log2FC Threshold:",
+        value = 1, min = -5, max = 5, step = 0.1)
+    ),
+    column(6,
+      numericInput("padj_threshold", "P-value Threshold:",
+        value = 0.05, min = 0.001, max = 0.1, step = 0.001)
+    )
+  )
+)
+
+# Volcano plot
+fluidRow(
+  column(12,
+    h3("Multiple Volcano Plots by Study"),
+    uiOutput("multi_volcano_plots"),
+    p("Volcano plot showing differentially expressed genes between selected conditions.")
+  )
+)
+br()  # break line
+hr(style = "margin: 30px 0;")  # horizontal rule for separation
+fluidRow(
+  column(6,
+    DT::dataTableOutput(outputId = "diff_expr_table")
+  )
+)
+
+```
+
+### Comparative Viewer
+```{r}
+
+
+# tidyproteomics plots
+sidebarLayout(
+  sidebarPanel(
+    selectInput(inputId = "normalisation_method",
+      label = "Normalization Method",
+      choices = c("scaled", "median", "linear", "limma", "loess"),
+      selected = "median"
+    )
+  ),
+  mainPanel(
+    tabsetPanel(
+      tabPanel("PCA", plotOutput("pca_plot", height = "500px")),
+      tabPanel("Variation PCA", plotOutput("variation_pca_plot", height = "500px")),
+      tabPanel("Heatmap", plotOutput("heatmap_plot", height = "500px"))
+    )
+  )
+)
+
+fluidRow(
+  column(12,
+    DT::dataTableOutput(outputId = "sql_to_tidyproteomics_data")
+  )
+)
+
+fluidRow(
+  column(12,
+    plotOutput("comparative_plots", height = "500px"),
+    p("Comparative analysis across selected datasets.")
+  )
+)
+# renderPlot({
+#   if(is.null(data_holder$data)) {
+#     plot.new()
+#     text(0.5, 0.5, "No data loaded", cex = 2)
+#   } else {
+#     plot(cars)
+#   }
+# })
+
+# check 
+# Comparative View {data-icon="code-compare"}
+
+# fluidRow(
+#   column(6, 
+#     div(
+#       style = "border: 1px solid #ddd; border-radius: 5px; padding: 15px;",
+#       h3("Condition A (Control)"),
+#       plotlyOutput("conditionA_plot", height = "400px")
+#     )
+#   ),
+#   column(6, 
+#     div(
+#       style = "border: 1px solid #ddd; border-radius: 5px; padding: 15px;",
+#       h3("Condition B (Disease)"),
+#       plotlyOutput("conditionB_plot", height = "400px")
+#     )
+#   )
+# )
+```
+
+### Gene Regulatory Network (GRN)
+```{r}
+renderPlot({
+  if(is.null(data_holder$data)) {
+    plot.new()
+    text(0.5, 0.5, "No data loaded", cex = 2)
+  } else {
+    plot(cars)
+  }
+})
+```
+
+## Main Panel
+```{r}
+# ...
+```
+
+
+
+```{r server}
+#| context: server
+
+#   NB context: server-start is not a valid place to use input$... Ensure all input$... access is inside `context: server` blocks or inside an observe() / render*() / reactive() within the server scope.
+#   NB Use observe() for one-time setup (populating dropdown choices). Use output$... for dynamic content that users interact with repeatedly
+
+# Initialise and populate reactive values for value boxes
+data_holder <- reactiveValues(data = NULL)
+
+### ~Homepage~
+# Update value boxes
+total_datasets <- reactive({
+  tryCatch({
+    dbGetQuery(con, "SELECT COUNT(DISTINCT study_name) as count FROM proteomics_study")$count[1]
+  }, error = function(e) 0)
+})
+output$total_datasets_box <- renderValueBox({
+  valueBox(
+    value = total_datasets(),
+    subtitle = "Total number of datasets",
+    icon = icon("dna"),
+    color = "blue"
+  )
+})
+
+selected_datasets <- reactive({
+  length(input$datasets %||% character(0))
+})
+output$selected_datasets_box <- renderValueBox({
+  valueBox(
+    value = selected_datasets(),
+    subtitle = "Datasets Selected",
+    icon = icon("database"),
+    color = "teal"
+  )
+})
+
+selected_genes <- reactive({
+  length(input$search_genes %||% character(0))
+})
+output$selected_genes_box <- renderValueBox({
+  valueBox(
+    value = selected_genes(),
+    subtitle = "Genes Selected",
+    icon = icon("vial"),
+    color = "green"
+  )
+})
+
+### ~Side menu - select data~
+# Filter datasets (refer to `inputId` event label), by querying and storing results in data_holder$data
+observeEvent(input$datasets, {
+  req(input$datasets)
+  
+  study_choices <- dbGetQuery(con, "SELECT DISTINCT Study_name FROM proteomics_study")
+  req(all(input$datasets %in% study_choices$Study_name))  # checks if selected dataset is valid
+
+  # Create a glue_sql-safe IN clause to prevent SQL injection
+  query <- glue_sql("
+    SELECT * FROM proteomics_exp
+    WHERE Study_name IN ({input$datasets*})
+  ", .con = con)
+
+  filtered_query <- glue_sql("
+  SELECT * FROM proteomics_exp
+  WHERE Study_name IN ({input$datasets*})
+  AND Organism IN ({input$organism_filter*})", .con = con)
+
+  data_holder$data <- dbGetQuery(con, query)
+  # dbDisconnect(con) # ?????????
+
+})
+
+# Update tabs when selecting analysis type
+observeEvent(input$analysis, {
+  req(input$analysis)
+  if(input$analysis != " ") {
+    updateTabsetPanel(session, "tabs", selected = input$analysis)
+  }
+})
+
+# Update gene/ protein selection - server logic in observe blocks
+observe({
+  updateSelectizeInput(session, "search_genes",
+    choices = unique(dbGetQuery(con, "
+      SELECT DISTINCT Human_Gene FROM proteomics_exp
+      UNION 
+      SELECT DISTINCT Mouse_Gene FROM proteomics_exp
+      UNION
+      SELECT DISTINCT Uniprot_id FROM proteomics_exp
+      UNION
+      SELECT DISTINCT Protein_Name FROM proteomics_exp
+    ")[[1]]),
+    server = TRUE
+  )
+})
+
+# Reactively filters the `exp_table` by gene(s) via sql query for `Experimental results` tab
+      # # to exclude the `Exp_id` column: SELECT Human_Gene, Mouse_Gene, Uniprot_id, Protein_Name, abundance_A, abundance_B, logFC_A_vs_B, pvalue_A_vs_B, padj_A_vs_B FROM proteomics_exp FROM proteomics_exp
+output$exp_table <- DT::renderDataTable({   # define a reactive output by creating a reactive expression to rebuild table
+  req(con)    # checks db connection
+  gene_filter <- input$search_genes   # gets input from `inputId`
+
+  query <- if (!is.null(gene_filter) && length(gene_filter) > 0) {
+    glue_sql("
+      SELECT * FROM proteomics_exp
+      WHERE Human_Gene IN ({gene_filter*})
+        OR Mouse_Gene IN ({gene_filter*})
+        OR Uniprot_id IN ({gene_filter*})
+        OR Protein_Name IN ({gene_filter*})
+    ", .con = con)
+  } else {
+    "SELECT * FROM proteomics_exp"
+  }
+
+  exp_data <- dbGetQuery(con, query)
+
+  # Render data table
+  DT::datatable(
+    exp_data,
+    caption = htmltools::tags$caption(
+      style = 'caption-side: bottom; text-align: left; color: grey',
+      "Experimental data from the SQL database, including logFC and adjusted p-values across comparisons."
+    ),
+    filter = "top",
+    options = list(
+      pageLength = 10,
+      autoWidth = TRUE,
+      scrollX = TRUE
+    )
+  )
+})
+
+# Update organism filter
+observe({
+  orgs <- dbGetQuery(con, "SELECT DISTINCT Organism FROM proteomics_study")[,1]
+  updateCheckboxGroupInput(session,
+    "organism_filter",
+    choices = sort(unique(orgs))
+  )
+})
+
+# FIXME !
+# Apply all other filters
+observeEvent(input$other_filters, {
+  req(input$other_filters)
+  selected_filters <- input$other_filters
+  # Apply filters to the data
+  filtered_data <- dbGetQuery(con, "SELECT * FROM proteomics_exp WHERE Organism IN ({selected_filters*})")
+  data_holder$data <- filtered_data
+})
+
+### ~QC Analysis~
+# Render html page of FastQC or MultiQC results, otherwise, use `fastqcr` package
+output$qc_report_display <- renderUI({
+  req(input$qc_file)
+  ext <- tools::file_ext(input$qc_file$name)
+
+  if (ext == "html") {
+    # Display html file directly
+    includeHTML(input$qc_file$datapath)
+  } else if (ext == "zip") {
+    # Extract and display FastQC html from zip
+    temp_dir <- tempdir()
+    unzip(input$qc_file$datapath, exdir = temp_dir)
+    html_files <- list.files(temp_dir, pattern = "*.html", recursive = TRUE, full.names = TRUE)
+    if(length(html_files) > 0) {
+      includeHTML(html_files[1])
+    } else {
+      h4("No HTML file found in the ZIP archive.")
+    }
+  } else {
+    h4("Unsupported file format. Please upload .html or .zip files.")
+  }
+})
+
+### ~Differential Expression Analysis~
+
+# CHECK!!!!!!!!!!!!!! - showing Significant genes: 0 / 11968 (0%)
+# Render summaries for the no. of significant genes based on user-defined thresholds
+output$threshold_summary <- renderText({
+  req(data_holder$data)
+  fc_thresh <- as.numeric(input$fc_preset)
+  pval_thresh <- as.numeric(input$pval_preset)
+
+  #..create df with significant genes
+  sig_genes <- data_holder$data %>%
+    filter(!is.na(logFC_A_vs_B), !is.na(padj_A_vs_B)) %>%
+    summarise(
+      total = n(),
+      # CAN YOU ADD >=
+      significant = sum(abs(as.numeric(logFC_A_vs_B)) > fc_thresh & as.numeric(padj_A_vs_B) < pval_thresh),
+      .groups = 'drop'
+    )
+
+  paste0("Significant genes: ", sig_genes$significant, " / ", sig_genes$total, 
+    " (", round(100 * sig_genes$significant / sig_genes$total, 1), "%)")
+})
+
+  # CHECK -log10 for padj!!!!!!!!!!!!!!
+  # PROTEIN OR GENE NAME MAY BE INCORRECT AND NOT PROPERLY INCLUDED FILTERED!!! - CHECK AND FIX!!!!!!!!!!!!!
+  # check or standardise axis lengths
+
+# Dynamic UI for multiple volcano plots & table for differential expression analysis
+output$multi_volcano_plots <- renderUI({
+  req(data_holder$data)
+  studies <- unique(data_holder$data$Study_name)    # plot per study
+  selected_genes <- input$search_genes %||% character(0)  # for highlighting GOI in plots
+
+  # Define threshold from preset selection or custom input
+  selected_preset <- input$threshold_preset
+  if (!is.null(selected_preset)) {
+    # Extract values based on the selection structure -  NEEDS TO EDIT AS FC VS LOGFC ARE DIFFERENT!!!!!, same as above selectInput()
+    if (selected_preset == "Strict (FC≥2, p≤0.01)") {
+      logfc_threshold <- 2
+      padj_threshold <- 0.01
+    } else if (selected_preset == "Moderate (FC≥1.5, p≤0.05)") {
+      logfc_threshold <- 1.5
+      padj_threshold <- 0.05
+    } else if (selected_preset == "Lenient (FC≥1, p≤0.1)") {
+      logfc_threshold <- 1
+      padj_threshold <- 0.1
+    } else {
+      # ...custom or fallback to default
+      logfc_threshold <- input$logfc_threshold %||% 1
+      padj_threshold <- input$padj_threshold %||% 0.05
+    }
+  } else {
+    # Fallback to direct inputs if preset not selected
+    logfc_threshold <- input$logfc_threshold %||% 1
+    padj_threshold <- input$padj_threshold %||% 0.05
+  }
+
+  # Create individual plots for each study
+  plot_outputs <- map(studies, function(study) {
+    plot_id <- paste0("volcano_", gsub("[^A-Za-z0-9]", "_", study))
+
+    # Create a rendered output
+    output[[plot_id]] <- renderPlotly({
+                        # # Get threshold values from inputs, otherwise use defaults
+                        # logfc_threshold <- input$logfc_threshold %||% 1
+                        # padj_threshold <- input$padj_threshold %||% 0.05
+      # ..filter for the current study, remove NAs, and calculate significance
+      study_data <- data_holder$data %>%
+        filter(Study_name == study, !is.na(logFC_A_vs_B), !is.na(padj_A_vs_B)) %>%
+        mutate(
+          log_padj = -log10(as.numeric(padj_A_vs_B)),
+          significant = ifelse(abs(as.numeric(logFC_A_vs_B)) > logfc_threshold & as.numeric(padj_A_vs_B) < padj_threshold, 
+            "Significant", "Not Significant"),
+          gene_label = coalesce(Human_Gene, Mouse_Gene, Uniprot_id, Protein_Name),
+          highlight_genes = gene_label %in% selected_genes
+        )
+
+      if(nrow(study_data) == 0) return(plotly_empty())
+
+      p <- ggplot(study_data, aes(x = logFC_A_vs_B, y = log_padj,
+        color = significant,
+        size = highlight_genes, # OR ifelse(highlight, 4, 1)
+            # Hover text:       OR use coalesce() ie "Gene: ", coalesce(Gene, Human_Gene, Mouse_Gene, "Unknown")
+            text = paste0(
+            # "Gene: ", ifelse(!is.null(Mouse_Gene), Mouse_Gene, 
+            #   ifelse(!is.null(Human_Gene), Human_Gene, "Unknown")),
+            "Human_Gene     : ", Human_Gene %||% "Unknown",  #ifelse(!is.null(Human_Gene), Human_Gene, "Unknown"), 
+            "\nMouse_Gene   : ", Mouse_Gene %||% "Unknown", #ifelse(!is.null(Mouse_Gene), Mouse_Gene, "Unknown"),
+            "\nUniprot_id   : ", Uniprot_id %||% "Unknown", #ifelse(!is.null(Uniprot_id), Uniprot_id, "Unknown"),
+            "\nProtein_Name : ", Protein_Name %||% "Unknown",# ifelse(!is.null(Protein_Name), Protein_Name, "Unknown"),
+            "\nlogFC        : ", round(as.numeric(logFC_A_vs_B), 3),
+            "\np-adj        : ", format(padj_A_vs_B, scientific = TRUE, digits = 3),
+            "\n-log10(p-adj): ", round(log_padj, 3),
+            "\nsignificant? : ", significant
+          )
+          )) +
+        geom_point(alpha = 0.7) +
+        geom_hline(yintercept = -log10(padj_threshold), linetype = "dashed") +
+        geom_vline(xintercept = c(-logfc_threshold, logfc_threshold), linetype = "dashed") +
+        scale_color_manual(values = c("Not Significant" = "grey", "Significant" = "red")) +
+        scale_size_manual(values = c("TRUE" = 4, "FALSE" = 1)) +
+        labs(x = "Log2 Fold Change", y = "-log10(adjusted P-value)", 
+          title = paste("Volcano Plot:", study)) +
+        theme_minimal()
+
+      ggplotly(p, height = 400)
+    })
+
+    # Return UI element
+    div(
+      class = "col-md-6",
+      style = "margin-bottom: 20px;",
+      h4(study, style = "text-align: center;"),
+      plotlyOutput(plot_id, height = "400px")
+    )
+  })
+
+  # Wrap in fluidRow
+  do.call(fluidRow, plot_outputs)
+})
+
+### DOES THIS FILTER WITH USER-DEFINED INPUTS??????? - CHECK
+# Render table
+output$diff_expr_table <- DT::renderDataTable({
+  req(data_holder$data)
+
+  # Filter for significant results
+  if("padj_A_vs_B" %in% names(data_holder$data)) {
+    sig_data <- data_holder$data[data_holder$data$padj_A_vs_B < 0.05, ]
+  } else {
+    sig_data <- data_holder$data
+  }
+
+  DT::datatable(sig_data,
+    caption = "Significantly differentially expressed genes (padj < 0.05)",
+    options = list(pageLength = 10,scrollX = TRUE),
+    filter = 'top'
+  )
+})
+
+
+### ~Comparative Viewer~
+
+# First, create function to create a suitable object from SQLite data, for tidyproteomics package
+create_tidyproteomics_from_sql <- function(con, datasets = NULL, search_genes = NULL) {
+
+  # Create a basic tidyproteomics object structure
+  tidy_obj <- list()
+  if (class(tidy_obj) != "tidyproteomics") {
+    class(tidy_obj) <- "tidyproteomics"
+  }
+
+      ## CHECK IF `LEFT JOIN proteomics_proteins USING (Uniprot_id)` IS NEEDED BEFORE WHERE STATEMENT??????
+  # Query database based on user-defined filters
+  query <- if (!is.null(search_genes) && length(search_genes) > 0 && !is.null(datasets) && length(datasets) > 0) {
+    glue_sql("
+      SELECT * FROM proteomics_exp
+      WHERE Study_name IN ({datasets*})
+        AND (
+          Human_Gene IN ({search_genes*})
+          OR Mouse_Gene IN ({search_genes*})
+          OR Uniprot_id IN ({search_genes*})
+          OR Protein_Name IN ({search_genes*})
+        )
+    ", .con = con)
+  } else {
+    "SELECT * FROM proteomics_exp"
+  }
+
+  # Get data from database
+  exp_data <- dbGetQuery(con, query)
+
+            # Get unique study names to create sample columns
+            studies <- unique(exp_data$Study_name)
+
+  # Transform data to format expected by tidyproteomics - check: https://github.com/vdemichev/DiaNN?tab=readme-ov-file#main-output-reference
+  # ...reshape into long format
+  reshaped_data <- exp_data %>%
+    mutate(across(starts_with("abundance_"), as.numeric)) %>%  # due to SQL data type, REAL, also containing NAs
+    select(
+      Exp_id,
+      Uniprot_id,
+      Protein_Name,
+      Protein_Description,
+      Human_Gene,
+      Mouse_Gene,
+      Study_name,
+      sample_A = Sample_or_condition_A,
+      sample_B = Sample_or_condition_B,
+      abundance_A,
+      abundance_B
+    ) %>%
+    # ..create sample columns from samples/ conditions
+    pivot_longer(
+      cols = c(abundance_A, abundance_B, sample_A, sample_B), names_to = c(".value", "temp"), names_sep = "_"   # cols = c(abundance_A, abundance_B), names_to = "condition", values_to = "abundance") %>% 
+    ) %>%
+    select(-sample) %>%
+    dplyr::rename(sample = temp) %>%  # sample or condition????
+
+    # ~NEEDED???~
+    # ...create gene column while prioritising 'Human_Gene' where available
+    mutate(
+      gene = ifelse(!is.na(Mouse_Gene) & Mouse_Gene != "", Mouse_Gene, Human_Gene) 
+    ) %>%
+
+    # ...select mandatory columns
+    select(Uniprot_id, Protein_Name, Protein_Description, gene, Study_name, sample, abundance)
+
+  # ...define annotation table, 
+  annotations <- reshaped_data %>%
+    select(Uniprot_id, Protein_Name, Protein_Description)
+
+  # ...define experimental table
+  experiments <- reshaped_data %>%
+    select(Study_name, sample, abundance) %>%
+    # distinct() %>%    # exclude distinct() as may contain replicates
+    dplyr::rename(import_file = Study_name)
+
+  # ...define sample metadata
+  samples <- reshaped_data %>%
+    select(sample)      # exclude distinct() as may contain replicates
+
+  # ...define abundance table
+  quantitation <- reshaped_data %>%
+    select(
+      sample,
+      gene,
+      Uniprot_id,
+      abundance
+    ) %>%
+
+  # Build tidyproteomics object
+  tidy_obj$origin <- "SQL_imported_data"
+  tidy_obj$annotations <- annotations
+  tidy_obj$samples <- samples
+  tidy_obj$quantitation <- quantitation
+  tidy_obj$experiments <- experiments
+  tidy_obj$counts <- list(
+    proteins = nrow(annotations),
+    samples = nrow(samples)
+  )
+  tidy_obj$metadata <- list(
+    data_origin = "SQLite database imported",
+    db_name = basename(dbGetInfo(con)$dbname),
+    import_date = Sys.time()
+  )
+
+  return(tidy_obj)
+
+}
+
+# Use in reactive context
+sql_tidyproteomics_data <- reactive({
+  # check filtered data is available
+  req(con, input$search_genes, input$datasets)
+
+  # ...create tidyproteomics object
+  create_tidyproteomics_from_sql(con = con,
+    datasets = input$datasets,
+    search_genes = input$search_genes)
+})
+
+
+# Create tidyproteomics-based plots
+
+# First display transformed data
+if (!inherits(data, "tidyproteomics")) {
+  # stop("Data must be a tidyproteomics object.")
+} else {
+  output$sql_to_tidyproteomics_data <- DT::renderDataTable({
+  req(sql_tidyproteomics_data)
+
+  DT::datatable(
+    sql_tidyproteomics_data,
+    caption = htmltools::tags$caption(
+      style = 'caption-side: bottom; text-align: left; color: grey',
+      " SERVER : PROOF OF sql_to_tidyproteomics_data ."
+    ),
+    filter = "top",
+    options = list(
+      pageLength = 10,
+      autoWidth = TRUE,
+      scrollX = TRUE
+    )
+  )
+  })
+}
+
+
+
+# Principal component analysis (PCA) of abundance levels (??? or Fold-Change ???) to determine the principle axes of abundance variation
+output$pca_plot <- renderPlot({
+  req(sql_tidyproteomics_data)
+  sql_tidyproteomics_data %>%
+    normalize(.method = input$normalisation_method) %>%
+    select_normalization() %>%
+    plot_pca()
+})
+
+# Plot variation PCA
+output$variation_pca_plot <- renderPlot({
+  req(sql_tidyproteomics_data)
+  sql_tidyproteomics_data %>%
+    normalize(.method = input$normalisation_method) %>%
+    select_normalization() %>%
+    plot_variation_pca()
+})
+
+# Heatmap of clustered samples and abundance levels
+  output$heatmap_plot <- renderPlot({
+    req(sql_tidyproteomics_data())
+    sql_tidyproteomics_data %>%
+      select_normalization() %>%
+      plot_heatmap()
+  })
+
+# Expression Heatmap
+# Correlation Heatmap
+
+
+### ~Gene Regulatory Network (GRN)~
+
+```

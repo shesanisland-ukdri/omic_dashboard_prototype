@@ -1,0 +1,153 @@
+-- database: ./db_for_prototype.db
+-- First, attach experimental database
+ATTACH DATABASE '/Users/dammy/Documents/WRANGLER PROJECT/prototype/data/Blanca/experimental.db' AS experimental;
+
+
+-- Create tables in the main database (db_for_prototype.db)
+
+-- Creates proteomics protein table
+CREATE TABLE proteomics_proteins (
+  Uniprot_id TEXT PRIMARY KEY,
+  Protein_Name TEXT,
+  Protein_Description TEXT
+);
+
+-- Creates proteomics study table
+CREATE TABLE proteomics_study (
+  Study_id INTEGER PRIMARY KEY,
+  Study_name TEXT,
+  Lab_name TEXT,
+  Data_omic_type TEXT, 
+  Study_Description TEXT,
+  Published TEXT
+);
+-- Inserts info into proteomics_study table
+INSERT INTO proteomics_study (
+  Study_name, Lab_name, Data_omic_type, Study_Description, Published
+) VALUES (
+  'Astrocyte_TurboID_vs_tdT', 'Blanca_Lab', 'proteomics', 'Astrocyte experiment', 'NA'
+);
+INSERT INTO proteomics_study (
+  Study_name, Lab_name, Data_omic_type, Study_Description, Published
+) VALUES (
+  'Endfoot_LPS_vs_PBS', 'Blanca_Lab', 'proteomics', 'Endfoot experiment', 'NA'
+);
+INSERT INTO proteomics_study (
+  Study_name, Lab_name, Data_omic_type, Study_Description, Published
+) VALUES (
+  'Endfoot_Bulk_vs_Vessel', 'Blanca_Lab', 'proteomics', 'Endfoot experiment', 'NA'
+);
+INSERT INTO proteomics_study (
+  Study_name, Lab_name, Data_omic_type, Study_Description, Published
+) VALUES (
+  'Human_TurboID_vs_tdT', 'Blanca_Lab', 'proteomics', 'Human experiment', 'NA'
+);
+
+-- Creates proteomics experimental table & combines proteomic datasets into a single table with consistent column names ie condition_A_abundance, condition_B_abundance
+CREATE TABLE proteomics_exp (
+  Exp_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  Study_id INTEGER,
+  Study_name TEXT,
+  Mouse_Gene TEXT,
+  Human_Gene TEXT,
+  Uniprot_id TEXT,
+  Protein_Name TEXT,
+  Protein_Description TEXT,
+  Sample_or_condition_A REAL,
+  Sample_or_condition_B REAL,
+  abundance_A REAL,
+  abundance_B REAL,
+  DE TEXT,
+  logFC_A_vs_B REAL,
+  pvalue_A_vs_B REAL,
+  padj_A_vs_B REAL,
+  FOREIGN KEY (Study_id) REFERENCES proteomics_study(Study_id)
+);
+
+-- Inserts into proteomics_exp table
+-- Astrocyte TurboID vs tdT
+INSERT INTO proteomics_exp (
+  Study_id, Study_name, Mouse_Gene, Human_Gene, Uniprot_id, Protein_Name, Protein_Description,
+  abundance_A, abundance_B, DE, logFC_A_vs_B, pvalue_A_vs_B, padj_A_vs_B
+)
+SELECT 
+  (SELECT Study_id FROM proteomics_study WHERE Study_name = 'Astrocyte_TurboID_vs_tdT'),
+  'Astrocyte_TurboID_vs_tdT',
+  [Mouse.Gene],
+  [Human.Gene],
+  [Uniprot ID],
+  [Protein Name],
+  [Protein Description],
+  [TurboID avg abundance],
+  [tdT avg abundance],
+  [Differentially Expressed?],
+  [logFC (TurboID vs. tdT)],
+  [P.Value (TurboID vs. tdT)],
+  [adj.P.Value (TurboID vs. tdT)]
+FROM experimental.BDC_Astrocyte_proteome_for_website_20250512;
+
+-- Endfoot LPS vs PBS
+INSERT INTO proteomics_exp (
+  Study_id, Study_name, Mouse_Gene, Human_Gene, Uniprot_id, Protein_Name, Protein_Description,
+  abundance_A, abundance_B, DE, logFC_A_vs_B, pvalue_A_vs_B, padj_A_vs_B
+)
+SELECT 
+  (SELECT Study_id FROM proteomics_study WHERE Study_name = 'Endfoot_LPS_vs_PBS'),
+  'Endfoot_LPS_vs_PBS',
+  [Mouse.Gene],
+  [Human.Gene],
+  [Uniprot ID],
+  [Protein Name],
+  [Protein Description],
+  [LPS avg abundance],
+  [PBS avg abundance],
+  [Differentially Expressed?],
+  [logFC (LPS_vs_PBS)],
+  [P.Value (LPS_vs_PBS)],
+  [adj.P.Value (LPS_vs_PBS)]
+FROM experimental.BDC_Endfoot_LPSvPBS_proteome_for_website_20250512;
+
+-- Endfoot Bulk vs Vessel
+INSERT INTO proteomics_exp (
+  Study_id, Study_name, Mouse_Gene, Human_Gene, Uniprot_id, Protein_Name, Protein_Description,
+  abundance_A, abundance_B, DE, logFC_A_vs_B, pvalue_A_vs_B, padj_A_vs_B
+)
+SELECT 
+  (SELECT Study_id FROM proteomics_study WHERE Study_name = 'Endfoot_Bulk_vs_Vessel'),
+  'Endfoot_Bulk_vs_Vessel',
+  [Mouse.Gene],
+  [Human.Gene],
+  [Uniprot ID],
+  [Protein Name],
+  [Protein Description],
+  [TurboID avg abundance],
+  [tdT avg abundance],
+  [Classification],
+  [logFC (TurboID vs. tdT)],
+  [P.Value (TurboID vs. tdT)],
+  [adj.P.Value (TurboID vs. tdT)]
+FROM experimental.BDC_Endfoot_proteome_for_website_20250512;
+
+-- Human TurboID vs tdT
+INSERT INTO proteomics_exp (
+  Study_id, Study_name, Human_Gene, Uniprot_id, Protein_Name, Protein_Description,
+  abundance_A, abundance_B, DE, logFC_A_vs_B, pvalue_A_vs_B, padj_A_vs_B
+)
+SELECT 
+  (SELECT Study_id FROM proteomics_study WHERE Study_name = 'Human_TurboID_vs_tdT'),
+  'Human_TurboID_vs_tdT',
+  [Human.Gene],
+  [Uniprot ID],
+  [Protein Name],
+  [Protein Description],
+  [Bulk_avg_abundance],
+  [Vessel_avg_abundance],
+  [Differentially Expressed?],
+  [logFC (Vessel vs. Bulk)],
+  [P.Value (Vessel vs. Bulk)],
+  [adj.P.Value (Vessel vs. Bulk)]
+FROM experimental.BDC_Human_proteome_for_website_20250512;
+
+
+-- Detach the experimental database when done
+DETACH DATABASE experimental;
